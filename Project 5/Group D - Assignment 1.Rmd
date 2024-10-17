@@ -1,0 +1,464 @@
+---
+title: "Exploring the Impact of the Plus Program in Airbnb Performance" 
+author: "Ana Ferreira, Claudius Kroflin, Edet Bassey, Federico Scandizzo"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+    toc: false
+    number_sections: false
+fontsize: 12pt
+geometry: margin=1in
+linestretch: 1.5
+mainfont: Times New Roman
+---
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.45\textwidth, height=2.5cm]{airbnb.png} 
+  \hspace{0.75cm} 
+  \includegraphics[width=0.45\textwidth, height=2.5cm]{catolica.png} 
+\end{figure}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE, message = FALSE)
+Sys.setlocale("LC_TIME","en_US.UTF-8")
+
+library(tidyverse)
+library(gridExtra)
+library(lubridate)
+library(kableExtra)
+library(infer)
+library(janitor)
+library(stargazer)
+
+data <- read_csv("airbnb_data_clean.csv")
+```
+
+# Introduction 
+
+In 2018, Airbnb introduced the Plus program, an initiative designed to improve match-making for users seeking premium accommodations. The core objective of this study is to evaluate the impact of the program and determine whether differentiating high-quality services contributes to improved platform performance.
+
+The research will be structured by first providing a dataset overview, outlining the relevant performance metrics, explanatory and other secondary variables. Next, a data quality assessment is given by explaining how missing values, inconsistencies and outliers were dealt with. The exploratory data analysis comes next, starting with the evolution of performance metrics overtime, highlighting the two implementation dates of the Airbnb Plus program to emphasize before and after changes.
+
+The primary research question guiding this analysis is: "What is the impact of Airbnb Plus? Specifically, does distinguishing high-quality services lead to enhanced platform performance?"
+
+\newpage
+
+# 1. Dataset Overview 
+
+The Dataset has a total of `r nrow(data)` observations across `r ncol(data)` variables. It covers `r n_distinct(data$zipcode)` zipcodes within `r n_distinct(data$city_number)` US cities from the beginning of  August 2017 (`timperiod` = `r min(data$timeperiod)`) to the end of October 2019 (`timperiod` = `r max(data$timeperiod)`). 
+
+```{r}
+cities_analysis <- data %>% group_by(city_number) %>% summarize(plus = sum(policy_entry))
+# If plus == 0 then plus program was never implemented in that city if != 0 then plus program was implemented at some point in time period
+
+# Cities with plus program
+data_with_plus <- data %>% filter(policy_entry > 0)
+# Cities: 4, 5, 6, 9 and 11
+
+# Categorical variable with city name - Identified by searching zipcodes online
+data <- data %>% mutate(city_name = if_else(city_number == 4, "Denver", 
+                                    if_else(city_number == 5, "Nashville", 
+                                    if_else(city_number == 6, "New Orleans", 
+                                    if_else(city_number == 9, "San Francisco", 
+                                    if_else(city_number == 11, "Washington DC", "Others"))))))
+
+# Transforming time period to a more readable date
+data$date = as.Date(as.Date("2017-08-01") + months(data$timeperiod - 8), "%Y %m")
+```
+
+The Airbnb Plus Program was only implemented in `r n_distinct(data_with_plus$city_number)` cities, such as *San Francisco*, *Denver*, *Nashville*, *New Orleans* and *Washington DC*. San Francisco got the program implemented in February 2018 (`timeperiod = 14`) while the others had it starting in October 2018 (`timeperiod = 22`).
+
+For the scope of the research, the relevant key variables are the following: 
+
+  + **Performance Metrics:** `total_bookings`, `booking_rate`, `listing_avg_review`, `average_booked_nights`
+  + **Secondary variables:** `zipcode`, `timeperiod`, `city_number`, `policy_entry`
+  
+Other than the above, two new variables were created and added to the data set:
+
+  + **`city_name`**: transforms the `city_number` to the name of the city according to the `zipcode`s included in it for relevant cities and to *Others* for those who did not had the plus program introduced at any point in time
+  + **`date`**: transforms the `timeperiod` into the correspondent *year-month* format
+
+```{r , include=FALSE}
+# Selecting only the variables that are important for our research
+data_clean <- data %>% select(total_bookings, booking_rate, listing_avg_review, average_booked_nights, zipcode, timeperiod, date, city_number, city_name, policy_entry)
+
+# Removing what is not necessary anymore to not overload the environment
+rm(data, cities_analysis, data_with_plus)
+gc()
+```
+
+\newpage
+
+# 2. Data Quality Assessment
+
+To assess the quality of the dataset, it is important to look at the distribution of the key identified variables. 
+
+```{r}
+# Histograms for metric variables
+plot_histogram = function(var, title){
+  ggplot(data_clean, aes(x = !!sym(var))) +
+    geom_histogram(fill = I("lightblue3"), color = I("lightblue3")) + 
+    labs(title = paste("Distribution of", title)) + 
+    theme_bw()+
+    theme(plot.title = element_text(size = 10))
+}
+
+plot1 = plot_histogram("booking_rate", "Booking Rate")
+plot2 = plot_histogram("total_bookings", "Total Bookings")
+plot3 = plot_histogram("average_booked_nights", "Average Booked Nights")
+plot4 = plot_histogram("listing_avg_review", "Average Review")
+
+grid.arrange(plot1, plot2, plot3, plot4, ncol = 2)
+rm(plot1, plot2, plot3, plot4)
+```
+
+The variables `booking_rate` and `average_booked_nights` have both negative to positive values. When cancellations outweigh the bookings, the observation is a negative value, and vice-versa. In the `listing_avg_review` there are some “0” values, which affect the mean and distribution of this variable. Given that Airbnb review ranges on a scale from 1 to 5 stars, the 0 values will be treated the same as missing values (described later in the section). Other than the above, it seems like there is no other significant presence of outliers. To further investigate the variables, a box plot distribution is shown for each one. 
+
+```{r , fig.height=2.5}
+# Outliers
+# Box Plots for metric variables
+plot_boxplot = function(var, title){
+  ggplot(data_clean, aes(x = !!sym(var))) +
+    geom_boxplot(fill = I("lightblue3"), color = I("black")) +
+    coord_flip() + 
+    labs(x = paste(title)) + 
+    theme_bw() +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank()) +
+    theme(plot.title = element_text(size = 10))
+}
+
+plot1 = plot_boxplot("booking_rate", "Booking Rate")
+plot2 = plot_boxplot("total_bookings", "Total Booking")
+plot3 = plot_boxplot("average_booked_nights", "Average Booked Nights")
+plot4 = plot_boxplot("listing_avg_review", "Average Reviews")
+
+grid.arrange(plot1, plot2, plot3, plot4, ncol = 4)
+rm(plot1, plot2, plot3, plot4)
+```
+
+Most of the box plots show that the minimum and maximum values fit within the distribution. The `listing_avg_review` is the only with more of a significant outlier, apart from the 0’s that were tackled previously. This outlier was left unchanged, since it is most likely just a very bad review.
+
+```{r}
+# For listing_avg_review we are gonna treat values that are 0 or less as NA
+data_clean <- data_clean %>% 
+  mutate(listing_avg_review = if_else(listing_avg_review <= 0, NA, listing_avg_review))
+
+# Counting the number of NAs in each variable
+check_na_var = function(data){
+
+  var = colnames(data)
+  n_na = sapply(var, function(x) sum(is.na(data[[x]])))
+
+  df_na = data.frame(var = var, n_na = n_na)
+  return(df_na)
+}
+var_na <- check_na_var(data_clean) %>% filter(n_na > 0)
+# Variables with NA: total_bookings, booking_rate, average_booked_nights, listing_avg_review
+## Adding means for later comparison
+var_na <- cbind(var_na, "Mean Before" = colMeans(data_clean %>% select(total_bookings, booking_rate, listing_avg_review, average_booked_nights), na.rm = TRUE))
+
+mean_na <- data_clean %>% select(city_name, timeperiod, var_na[[1]]) %>% group_by(city_name, timeperiod) %>% 
+  summarize(input_tb = mean(total_bookings, na.rm = TRUE),
+            input_br = mean(booking_rate, na.rm = TRUE),
+            input_abn = mean(average_booked_nights, na.rm = TRUE),
+            input_lar = mean(listing_avg_review, na.rm = TRUE))
+
+# Checking for NA in this table (that means we don't have info for that city in that time period at all in the original dataset so we gave it the same value as the next filled time period for that city)
+missing_mean <- check_na_var(mean_na) %>% filter(n_na > 0) 
+# 7 missings for input_tb, input_br and input_abn
+mean_na <- mean_na %>% fill(input_tb, input_br, input_abn, .direction = "up")
+missing_mean_after <- anyNA(mean_na) # FALSE - no more NA in mean
+
+data_clean <- data_clean %>%
+  left_join(mean_na) %>%
+  mutate(total_bookings = if_else(is.na(total_bookings), input_tb, total_bookings),
+         booking_rate = if_else(is.na(booking_rate), input_br, booking_rate),
+         average_booked_nights = if_else(is.na(average_booked_nights), input_abn, average_booked_nights),
+         listing_avg_review = if_else(is.na(listing_avg_review), input_lar, listing_avg_review)) %>%
+  select(-input_tb, -input_br, -input_abn, -input_lar)
+missing_data_after <- anyNA(data_clean) # FALSE - no more NA in the data set
+
+# Checking means diference
+var_na <- cbind(var_na, "Mean After" = colMeans(data_clean %>% select(total_bookings, booking_rate, listing_avg_review, average_booked_nights)))
+var_na <- var_na %>% mutate("% Change" = ((`Mean After` - `Mean Before`)/`Mean Before`)*100)
+```
+
+All the missing values were counted and identified between the variables. Removing these values would could create gaps in time for some zipcodes and, thus, for some cities. For this reason, it was decided to input the mean value of each variable in the correspondent combination of `city_name` and `timeperiod`. After creating a table with those means, there were some missing values which indicated that there is no information for some of these combinations. As a solution, each missing value was filled with the one of the next time period (i.e. `booking_rate` for Denver, `timeperiod` = 18 was missing so it was assumed it was equal to Denver, `timeperiod` = 19 that was complete). Next, missing values in the dataset were replaced with the respective value of the means table.
+This strategy allowed the analysis to introduce as less bias as possible by not removing potentially relevant data and without significant changes in the overall mean of cities and time period – these are two crucial variables for this analysis.
+
+```{r}
+## NA table
+knitr::kable(var_na %>% select(-var), digits = 2)
+```
+
+```{r}
+# Searching for duplicate rows
+n_dif_rows <- data_clean %>% group_by(zipcode, timeperiod) %>% summarize(n = n()) %>% filter(n > 1) %>% nrow()
+## Equals 0 so there are no duplicate rows
+```
+
+After doing the adjustments above, it was checked whether there were any duplicate rows – there were not. Next, `timeperiod` and `policy_entry` were investigated further.
+
+To make sure that there are no gaps in the timeline for each one of the relevant cities, a table was made that shows 0 if no information is present in the data for that city and time and 1 otherwise (see table below). It can be noticed that data for Denver, Washington DC and Nashville only start from April 2018 instead of August 2017. So, the conclusions for those cities will be based on that time period. Also, Denver had missing data in May 2018 which created a gap in time. To manage this an artificial row was created for that time period, which is simply the mean between April and June 2018 for that city.
+
+```{r}
+# Check if all cities have all timeperiods
+missing_cities <- table(data_clean$date, data_clean$city_name)
+missing_cities <- ifelse(missing_cities > 0, 1, 0)
+missing_cities <- as.data.frame(missing_cities) %>% select(`San Francisco`, Denver, `New Orleans`, `Washington DC`, Nashville, Others)
+
+# Creating an artificial row for Denver - time period = 17 in order to not have a gap in time
+data_artificial <- data_clean %>% filter(city_name == "Denver" & timeperiod %in% c(16, 18)) 
+artificial_row <- data_artificial %>% select(-city_name, -timeperiod) %>% summarize(across(everything(), mean)) 
+artificial_row <- artificial_row %>% mutate(city_name = "Denver",
+                                            timeperiod = 17)
+# anyNA(artificial_row) # FALSE
+
+data_clean <- rbind(data_clean, artificial_row)
+
+missing_cities_show <- colSums(missing_cities)
+
+knitr::kable(missing_cities_show, col.names = c("City", "Count Present Timeperiods"))
+```
+
+```{r}
+# Checking for coherence in policy_entry, 0 before plus enter and 1 after plus enter
+data_others <- data_clean %>% select(city_name, policy_entry) %>% filter(city_name == "Others") %>% mutate(Plus_in = "No")
+data_others <- data_others %>% group_by(city_name, Plus_in) %>% summarize(Policy_entry_sum = sum(policy_entry), n_row = n())  # Policy_entry_sum should be 0 
+
+data_sanfran <- data_clean %>% select(city_name, timeperiod, policy_entry) %>% filter(city_name == "San Francisco") %>% mutate(Plus_in = if_else(timeperiod < 14, "No", "Yes"))
+data_sanfran <- data_sanfran %>% group_by(city_name, Plus_in) %>% summarize(Policy_entry_sum = sum(policy_entry), n_row = n())
+
+data_2stage <- data_clean %>% select(city_name, timeperiod, policy_entry) %>% filter(city_name != "Others" & city_name != "San Francisco") %>% mutate(Plus_in = if_else(timeperiod < 22, "No", "Yes"))
+data_2stage <- data_2stage %>% group_by(city_name, Plus_in) %>% summarize(Policy_entry_sum = sum(policy_entry), n_row = n())
+
+data_policy <- rbind(data_others, data_sanfran, data_2stage)
+rm(data_others, data_sanfran, data_2stage)
+
+# Everything is working fine - no inconsistences in policy_entry
+```
+
+`policy_entry` = 0 means no Plus program and `policy_entry` = 1 means Plus program was present. Given this, the sum of all policy entries for cities before the implementation of the Plus program should be 0. The sum of all policy entries for cities after the implementation of the Plus program should be equal to the number of rows. This simple analysis was confirmed to be correct.
+
+Given the above, the final dataset is now ready and is the only one used throughout this research. The final dataset has `r nrow(data_clean)` observations across `r ncol(data_clean)` variables.
+
+```{r , include=FALSE}
+# Removing things that are not necessary anymore to not overload the environment
+rm(check_na_var, missing_data_after, missing_mean_after, missing_mean, mean_na, var_na, n_dif_rows, data_artificial, artificial_row, missing_cities, missing_cities_show, plot_histogram, plot_boxplot, data_policy)
+
+gc()
+# At this point we should only have data_clean in the environment
+```
+
+\newpage
+
+# 3. Exploratory Data Analysis
+
+This section will present a comprehensive exploration of the performance metrics over time. A focus will be placed on the two implementation dates of the Airbnb Plus program (February 2018 in San Francisco and October 2018 in other cities), enabling a visual comparison of platform performance before and after the program's introduction.
+
+```{r}
+performance_var <- data_clean %>% select(total_bookings, listing_avg_review, booking_rate, average_booked_nights) %>% names()
+
+plot_evolution <- function(var_name){
+  
+  var <- sym(var_name)
+  
+  data_plot <- data_clean %>% group_by(date) %>% summarize(mean = mean(!!var), .groups = 'drop')
+    
+  plot = ggplot(data_plot, aes(x = date, y = mean)) +
+    geom_line(color = I('lightblue3')) +
+    geom_vline(xintercept = as.Date("2018-02-01"), linetype = "dashed", color = "darkgrey", size = 1) +
+    geom_vline(xintercept = as.Date("2018-10-01"), linetype = "dashed", color = "darkgrey", size = 1) +
+    labs(title = paste("Evolution of ", var_name), x = "Date", y = "Mean") +
+    theme(plot.title = element_text(size = 10)) +
+    theme_bw() 
+  
+  return(plot)
+}
+
+plot_list <- lapply(performance_var, plot_evolution)
+do.call(grid.arrange, c(plot_list, ncol = 2))
+```
+
+Booking rate and average booked nights have a very similar performance since they measure the same metric. The most notable insight is how the implementation of the Plus program in San Francisco alone was able to significantly increase these metrics. In the second implementation, said metrics did see some performance increase but eventually dropped, suggesting the Plus program was more of a success in San Francisco than in the other cities. Listing average reviews had quite a volatile performance, suggesting mixed results in the Plus program meeting customer expectations. Later in other cities, reviews seemed to have consistently increased showing an improvement in customer satisfaction. Total bookings severely decreased after the Plus program in San Francisco, indicating mixed results when compared to the positive performance of booking rates. Perhaps, users booked more frequently but also cancelled more often which can explain how total bookings dropped. Later in other cities, total bookings also saw a consistent increase, like booking rates and average reviews.
+
+
+**Analysis of Booking Rate increase by city**
+
+How much of the booking rate did the Plus program contribute to? Was it more effective in San Francisco or in the later cities?
+In order to answer these questions, we will compare this metric to those cities that did not receive the Plus program at all.
+
+```{r , fig.height = 2.1}
+data_plot <- data_clean %>% group_by(city_name, date) %>% summarize(mean_br = mean(booking_rate)) %>% mutate(city_plus = if_else(city_name == "Others", "Cities without Plus", "Cities with Plus"))
+
+data_plot_SF <- data_plot %>% filter(city_name == "San Francisco" | city_name == "Others")
+data_plot_otherplus <- data_plot %>% filter(city_name != "San Francisco")
+
+data_plot <- data_plot %>% group_by(city_plus, date) %>% summarize(mean_br = mean(mean_br))
+
+ggplot(data_plot, aes(x = date, y = mean_br, group = city_plus, colour = city_plus)) +
+  geom_line() +
+  geom_vline(xintercept = as.Date("2018-02-01"), linetype = "dashed", color = "darkgrey", size = 1) +
+  geom_vline(xintercept = as.Date("2018-10-01"), linetype = "dashed", color = "darkgrey", size = 1) +
+  labs(title = paste("Overall Evolution of Booking Rate"), x = "Date", y = "Mean") +
+  theme(plot.title = element_text(size = 8)) +
+  theme_bw() +
+  scale_color_brewer(palette = "Set1") 
+
+ggplot(data_plot_SF, aes(x = date, y = mean_br, group = city_name, colour = city_name)) + 
+  geom_line() +
+  geom_vline(xintercept = as.Date("2018-02-01"), linetype = "dashed", color = "darkgrey", size = 1) +
+  labs(title = paste("Evolution of Booking Rate in San Francisco"), x = "Date", y = "Mean") + 
+  theme(plot.title = element_text(size = 8)) +
+  theme_bw() +
+  scale_color_brewer(palette = "Set1")
+
+ggplot(data_plot_otherplus, aes(x = date, y = mean_br, group = city_name, colour = city_name)) + 
+  geom_line() +
+  geom_vline(xintercept = as.Date("2018-10-01"), linetype = "dashed", color = "darkgrey", size = 1) +
+  labs(title = "Evolution of Booking Rate in Other Cities with Plus Program", x = "Date", y = "Mean") + 
+  theme(plot.title = element_text(size = 8)) +
+  theme_bw()+
+  scale_color_brewer(palette = "Set1") 
+```
+
+The Plus program in San Francisco definitely increased booking rate against cities that did not receive it. The program later implemented in other cities (Denver, Nashville, New Orleans and Washington DC) also had increased booking rates compared to all other cities. However, as it was suggested in previous plots, the program in San Francisco seems to have been more successful. It is possible that the Plus program in San Francisco was more of a success because it was an unannounced pilot program. The program in other cities could have been less of a success for a large variety of reasons.
+
+
+**Analysis of Average Rating in second stage cities**
+
+If booking rates in the cities that got the Plus program (excluding San Francisco) didn't see much of an increase, did they at least have better average ratings, resulting in improved customer satisfaction?
+
+```{r}
+## Ploting Average Review Distribution for 2nd stage cities
+data_2stage <- data_clean %>% filter(city_name != "San Francisco" & city_name != "Others") %>%
+  mutate(policy_presence = if_else(policy_entry == 0, "Before", "After")) %>%
+  mutate(policy_presence = factor(policy_presence, levels = c("Before", "After"))) 
+
+plot_rating_city = function(city){
+  
+  data_plot <- data_2stage %>% filter(city_name == city) 
+
+  ggplot(data_plot, aes(x = policy_presence, y = listing_avg_review)) +
+    geom_boxplot(fill = I("lightblue3"), color = I("black")) +
+    labs(title = paste("Average Review for ", city), 
+         x = "Before/After Plus Program") + 
+    theme_bw()
+}
+
+cities <- unique(data_2stage$city_name)
+plot_list <- lapply(cities, plot_rating_city)
+do.call(grid.arrange, c(plot_list, ncol = 2))
+```
+
+Interestingly, the average rating in Washington DC, Nashville, New Orleans and Denver didn't change that much. The average rating was already very high. Perhaps, the Plus program in these cities did meet customers' expectations which allowed the rating to stay consistently high.
+
+To recap, the assumptions we can extrapolate from the previous visual inspections are the following: **overall booking rates increased in cities after receiving the Plus program**; however, this same metric **does not seem to have significantly improved in Denver, Nashville, New Orleans, and Washington DC**; finally, in these cities the **average review also seems to remain unchanged**.
+
+```{r , include=FALSE}
+# Removing things that are not necessary anymore to not overload the environment
+rm(data_2stage, data_plot, data_others, data_plot_otherplus, data_plot_SF, plot_list, cities, performance_var, plot_evolution, plot_rating_city)
+
+gc()
+# At this point we should only have data_clean in the environment
+```
+
+# 4. Hypothesis Testing
+
+To test the assumptions above, a short series of hypothesis testing will be conducted. However, because there have been two implementations of the Plus program, comparing the booking rate means of the Plus cities before and after at different time periods introduces bias, since there is mixed data between the two implementations. For this reason, the means of all the booking rates will be **grouped by policy entry** (whether the Plus program was present or not), instead of by time period, to still determine before and after effects.
+
+The first hypothesis is, therefore, the following:
+
+ - $H_0:$ The booking rate mean before Plus implementation is equal or larger than that after implementation.
+
+ - $H_a:$ The booking rate mean before Plus implementation is smaller than that after implementation.
+
+In order to test this hypothesis a left-tailed t-test will be conducted.
+
+```{r}
+data_test <- data_clean %>% filter(city_name != "Others")
+
+table_test <- data_test %>% group_by(policy_entry) %>% summarize(Mean = mean(booking_rate), SD = sd(booking_rate))
+
+knitr::kable(table_test, digits = 2) 
+
+test <- data_test %>% t_test(booking_rate ~ policy_entry, order = c("0", "1"), alternative = "less")
+knitr::kable(test)
+```
+
+The p-value of the test is extremely small, close to 0. Thus, the observed difference between the two group means is **statistically significant** at a 95% confidence level, leading to reject the null hypothesis of equality of means (p<0.05).
+
+
+The second hypothesis will test the **strength of the relationship** between booking rates and the implementation of the Plus program in Denver, Nashville, New Orleans and Washington DC.
+
+ - $H_0:$ There is no significant relationship between the booking rate and the implementation of the Plus program. *(β1 = 0)*
+
+ - $H_a:$ There is a significant relationship between the booking rate and the implementation of the Plus program. *(β1 ≠ 0)*
+
+In order to test this hypothesis a linear regression model will be applied.
+
+```{r , results = 'asis'}
+data_test <- data_clean %>% filter(city_name != "San Francisco" & city_name != "Others") %>% mutate(plus = if_else(timeperiod < 22, "Before", "After"))
+
+table_test <- data_test %>% group_by(plus) %>% summarize(Mean = mean(booking_rate), SD = sd(booking_rate)) 
+
+knitr::kable(table_test, digits = 2) 
+
+model_testing <- lm(booking_rate ~ plus, data = data_test)
+stargazer(model_testing, type = "latex", omit.stat = c("f", "adj.rsq"), no.space = TRUE, header = FALSE, title = "Relation Between Booking Rate and Plus Program")
+```
+
+Even though β1 ≠ 0 (-0.0023), the p-value for this coefficient is greater than 0.05. At a 95% confidence level, the coefficient is **not statistically significant**, indicating not enough statistical evidence that there is a significant relationship between the two variables.
+
+Finally, the third hypothesis states the following:
+
+ - $H_0:$ The average review mean for the second stage cities is equal before and after the plus implementation.
+
+ - $H_1:$ The average review mean for the second stage cities is different before and after the plus implementation.
+
+In order to test this hypothesis a two-tailed t-test will be conducted.
+
+```{r}
+data_test <- data_clean %>% filter(city_name != "San Francisco" & city_name != "Others")
+
+table_test <- data_test %>% group_by(policy_entry) %>% summarize(Mean = mean(listing_avg_review), SD = sd(listing_avg_review)) 
+
+knitr::kable(table_test, digits = 2)
+
+test <- data_test %>% t_test(listing_avg_review ~ policy_entry, order = c("0", "1"))
+knitr::kable(test)
+```
+
+The p-value of the test is greater than 0.05. So at a 95% confidence level, there is **no evidence of significant difference** between the means, leading to fail to reject the null hypothesis of equality of means.
+
+```{r , include=FALSE}
+# Removing things that are not necessary anymore to not overload the environment
+rm(data_test, model_testing, table_test, test)
+
+gc()
+# At this point we should only have data_clean in the environment
+```
+
+# Conclusion 
+
+In conclusion, it can be deduced that overall **booking rates significantly improved** after implementing the Plus program. It was found that the difference between the booking rate means was statistically significant.
+
+But, the change in **booking rate means was different** between the first implementation of the Plus program in San Francisco and the second in Nashville, New Orleans, Washington DC and Denver. 
+
+The first program in San Francisco seems much more successful, perhaps because it was essentially an unannounced pilot program. Therefore, it was worth investigating the effect of the program specifically in Nashville, New Orleans, Washington DC and Denver. Interestingly, **no evidence of a significant relationship was found between the implementation of Plus program and increase in booking rates**.
+
+Since the Plus program seemed to be less of a success in these cities when compared to San Francisco, it was worth exploring whether customer satisfaction changed instead. After testing for it, it was shown that there is **not enough evidence to conclude that there is a difference between means of listing average reviews**.
+
+In other words, the Plus program increased overall booking rates. The Plus program in San Francisco was a success, although it was a pilot one. In the cities where the program was later implemented, there was no relationship between the booking rates and the implementation of the program. Customer satisfaction might have played a role, except that no significant difference was found. This analysis was insightful to suggest several demographic topics for further research. Why was the pilot program such a success? Did employment rate play a role? Perhaps, San Francisco is a larger CBD than other cities, leading to better match-making for premium accommodations. Did seasonality matter during the second implementation? It could be that the program was less of a success since it was introduced after Summer, a time where people generally come back from holidays and book less vacations.
+
+
+\vspace{60pt}
+
+**Disclaimer**
+
+This research paper had its code deliberately debugged with the help of AI, making sure that the inevitable human errors were swiftly corrected by our digital assistant. Rest assured, no robots were harmed in the process, and the human touch remained essential. Other than debugging, AI was also used for coding suggestions and alternatives.
+
+*Fun fact:* this disclaimer was written by AI
