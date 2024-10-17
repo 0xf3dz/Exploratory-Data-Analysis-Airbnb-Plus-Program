@@ -1,2 +1,2 @@
 *.tex linguist-detectable=false
-*.R linguist-detectable=true
+*.Rmd linguist-detectable
